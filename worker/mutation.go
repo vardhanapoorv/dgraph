@@ -167,6 +167,17 @@ func runSchemaMutationHelper(ctx context.Context, update *pb.SchemaUpdate, start
 		OldSchema:     &old,
 		CurrentSchema: update,
 	}
+	if update.Predicate == "balance" && (len(update.GetTokenizer()) > 0 || update.Directive == pb.SchemaUpdate_REVERSE) {
+		go func() {
+			glog.Infof("BEGIN background indexing\n")
+			if err := rebuild.Run(context.Background()); err != nil {
+				panic(err)
+			}
+			glog.Infof("DONE background indexing\n")
+		}()
+		return nil
+	}
+
 	return rebuild.Run(ctx)
 }
 

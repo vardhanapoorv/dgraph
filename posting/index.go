@@ -528,6 +528,7 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	dbOpts := badger.DefaultOptions(tmpIndexDir).
 		WithSyncWrites(false).
 		WithNumVersionsToKeep(math.MaxInt64).
+		WithLogger(&x.ToGlog{}).
 		WithCompression(options.None).
 		WithEventLogging(false).
 		WithLogRotatesToFlush(10).
