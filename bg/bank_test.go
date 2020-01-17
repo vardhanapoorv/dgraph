@@ -23,6 +23,9 @@ import (
 func TestIndexInBG(t *testing.T) {
 	total := 1000000
 	ib := total
+	numAccts := total
+	mod := make(map[int]int, numAccts)
+	var lock sync.Mutex
 
 	dg, err := testutil.DgraphClient(testutil.SockAddr)
 	if err != nil {
@@ -41,11 +44,11 @@ func TestIndexInBG(t *testing.T) {
 	}
 
 	// first insert bank accounts
-	numAccts := total
 	fmt.Println("inserting accounts")
 	for i := 1; i <= numAccts; {
 		bb := &bytes.Buffer{}
 		for j := 0; j < 10000; j++ {
+			mod[i] = ib
 			_, err := bb.WriteString(fmt.Sprintf("<%v> <balance> \"%v\" .\n", i, ib))
 			if err != nil {
 				log.Fatalf("error in mutation %v\n", err)
@@ -65,23 +68,17 @@ func TestIndexInBG(t *testing.T) {
 		log.Fatalf("error in adding indexes :: %v\n", err)
 	}
 
-	var sig chan os.Signal
-	sig = make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-
 	// perform mutations until ctrl+c
-	mod := make(map[int]struct{})
-
 	mutateUID := func(uid int) {
-		switch uid % 4 {
+		nb := rand.Intn(ib)
+		switch uid % 3 {
 		case 0:
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
-				SetNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, ib-uid)),
+				SetNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, nb)),
 			}); err != nil {
 				log.Fatalf("error in mutation :: %v\n", err)
 			}
-			mod[uid] = struct{}{}
 		case 1:
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
@@ -89,7 +86,7 @@ func TestIndexInBG(t *testing.T) {
 			}); err != nil {
 				log.Fatalf("error in deletion :: %v\n", err)
 			}
-			mod[uid] = struct{}{}
+			nb = -1
 		case 2:
 			numAccts++
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
@@ -98,72 +95,99 @@ func TestIndexInBG(t *testing.T) {
 			}); err != nil {
 				log.Fatalf("error in insertion :: %v\n", err)
 			}
-		case 3:
-			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
-				CommitNow: true,
-				SetNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, ib+uid)),
-			}); err != nil {
-				log.Fatalf("error in mutation :: %v\n", err)
+		}
+
+		lock.Lock()
+		mod[uid] = nb
+		lock.Unlock()
+	}
+
+	var sig chan os.Signal
+	sig = make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+
+	// perform mutations until ctrl+c
+	var swg sync.WaitGroup
+	var counter uint64
+	quit := make(chan struct{})
+	runLoop := func() {
+		defer swg.Done()
+		for {
+			select {
+			case <-quit:
+				return
+			default:
+				mutateUID(rand.Intn(total) + 1)
+				atomic.AddUint64(&counter, 1)
 			}
-			mod[uid] = struct{}{}
 		}
 	}
-
-loop:
-	for {
-		select {
-		case <-sig:
-			break loop
-		default:
+	printStats := func() {
+		defer swg.Done()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-time.After(2 * time.Second):
+			}
+			fmt.Println("mutations:", atomic.LoadUint64(&counter))
 		}
-
-		uid := rand.Intn(total) + 1
-		mutateUID(uid)
 	}
+	swg.Add(3)
+	go runLoop()
+	go runLoop()
+	go printStats()
+	<-sig
+	close(quit)
+	swg.Wait()
+	signal.Reset(os.Interrupt)
 	fmt.Println("mutations done")
 
+	// compute reverse index
+	rmod := make(map[int][]int)
+	for uid, b := range mod {
+		if aa, ok := rmod[b]; ok {
+			rmod[b] = append(aa, uid)
+		} else {
+			rmod[b] = []int{b}
+		}
+	}
+	for _, aa := range rmod {
+		sort.Ints(aa)
+	}
+
 	// check values now
-	checkUID := func(i int) error {
-		q := fmt.Sprintf(`{ q(func: uid(%v)) {balance}}`, i)
+	checkBalance := func(b int, uids []int) error {
+		q := fmt.Sprintf(`{ q(func: eq(balance, "%v")) {uid}}`, b)
 		resp, err := dg.NewTxn().Query(context.Background(), q)
 		if err != nil {
 			log.Fatalf("error in query :: %v\n", err)
 		}
 		var data struct {
 			Q []struct {
-				Balance string
+				UID string
 			}
 		}
 		if err := json.Unmarshal(resp.Json, &data); err != nil {
 			log.Fatalf("error in json.Unmarshal :: %v", err)
 		}
 
-		_, ok := mod[i]
-		switch {
-		case !ok || i > total || i%4 == 2:
-			if len(data.Q) != 1 {
-				return fmt.Errorf("length not equal, got: %+v", data)
+		e := make([]int, len(data.Q))
+		for i, ui := range data.Q {
+			v, err := strconv.ParseInt(ui.UID, 0, 64)
+			if err != nil {
+				return err
 			}
-			if data.Q[0].Balance != strconv.Itoa(ib) {
-				return fmt.Errorf("value not equal, got: %+v", data)
-			}
-		case i%4 == 0:
-			if len(data.Q) != 1 {
-				return fmt.Errorf("length not equal, got: %+v", data)
-			}
-			if data.Q[0].Balance != strconv.Itoa(ib-i) {
-				return fmt.Errorf("value not equal, got: %+v", data)
-			}
-		case i%4 == 1:
-			if len(data.Q) != 0 {
-				return fmt.Errorf("length not equal, got: %+v", data)
-			}
-		case i%4 == 3:
-			if len(data.Q) != 1 {
-				return fmt.Errorf("length not equal, got: %+v", data)
-			}
-			if data.Q[0].Balance != strconv.Itoa(ib+i) {
-				return fmt.Errorf("value not equal, got: %+v", data)
+			e[i] = int(v)
+		}
+		sort.Ints(e)
+
+		if len(e) != len(uids) {
+			return fmt.Errorf("length not equal :: exp: %v, actual %v", e, uids)
+		}
+		for i := range uids {
+			if uids[i] != e[i] {
+				return fmt.Errorf("value not equal :: exp: %v, actual %v", e, uids)
 			}
 		}
 
@@ -176,21 +200,18 @@ loop:
 	}
 	ch := make(chan pair, numAccts)
 
-	signal.Reset(os.Interrupt)
 	fmt.Println("starting to query")
 	var wg sync.WaitGroup
 	var count uint64
-	for i := 1; i <= numAccts; i += 100 {
+	for b, uids := range rmod {
 		wg.Add(1)
-		go func(j int) {
+		go func(ba int, luid []int) {
 			defer wg.Done()
-			for k := j; k < j+100 && k < numAccts; k++ {
-				if err := checkUID(k); err != nil {
-					ch <- pair{k, err.Error()}
-				}
-				atomic.AddUint64(&count, 1)
+			if err := checkBalance(ba, luid); err != nil {
+				ch <- pair{ba, err.Error()}
 			}
-		}(i)
+			atomic.AddUint64(&count, 1)
+		}(b, uids)
 	}
 
 	wg.Add(1)
