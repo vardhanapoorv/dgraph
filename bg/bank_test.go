@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -11,23 +12,54 @@ import (
 	"os/signal"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v2/y"
+	"github.com/dgraph-io/dgo/v2"
 	"github.com/dgraph-io/dgo/v2/protos/api"
 	"github.com/dgraph-io/dgraph/testutil"
+	"github.com/dgraph-io/dgraph/x"
+	"google.golang.org/grpc"
 )
+
+func getClient() (*dgo.Dgraph, error) {
+	ports := []int{9180}
+	conns := make([]api.DgraphClient, len(ports))
+	for i, port := range ports {
+		conn, err := grpc.Dial(fmt.Sprintf("localhost:%v", port), grpc.WithInsecure())
+		if err != nil {
+			log.Fatalf("Error in creating grpc con: %v", err)
+		}
+
+		conns[i] = api.NewDgraphClient(conn)
+	}
+	dg := dgo.NewDgraphClient(conns...)
+
+	ctx := context.Background()
+	for {
+		// keep retrying until we succeed or receive a non-retriable error
+		err := dg.Login(ctx, x.GrootId, "password")
+		if err == nil || !strings.Contains(err.Error(), "Please retry") {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	return dg, nil
+}
 
 func TestIndexInBG(t *testing.T) {
 	total := 1000000
-	ib := total
-	numAccts := total
-	mod := make(map[int]int, numAccts)
+	numAccts := uint64(total)
+	acctsBal := make(map[int]int, numAccts)
 	var lock sync.Mutex
 
-	dg, err := testutil.DgraphClient(testutil.SockAddr)
+	// dg, err := testutil.DgraphClient(testutil.SockAddr)
+	dg, err := getClient()
 	if err != nil {
 		log.Fatalf("Error while getting a dgraph client: %v", err)
 	}
@@ -45,11 +77,11 @@ func TestIndexInBG(t *testing.T) {
 
 	// first insert bank accounts
 	fmt.Println("inserting accounts")
-	for i := 1; i <= numAccts; {
+	for i := 1; i <= int(numAccts); {
 		bb := &bytes.Buffer{}
 		for j := 0; j < 10000; j++ {
-			mod[i] = ib
-			_, err := bb.WriteString(fmt.Sprintf("<%v> <balance> \"%v\" .\n", i, ib))
+			acctsBal[i] = rand.Intn(total * 100)
+			_, err := bb.WriteString(fmt.Sprintf("<%v> <balance> \"%v\" .\n", i, acctsBal[i]))
 			if err != nil {
 				log.Fatalf("error in mutation %v\n", err)
 			}
@@ -68,37 +100,49 @@ func TestIndexInBG(t *testing.T) {
 		log.Fatalf("error in adding indexes :: %v\n", err)
 	}
 
+	if resp, err := dg.NewReadOnlyTxn().Query(context.Background(), "schema{}"); err != nil {
+		log.Fatalf("error in adding indexes :: %v\n", err)
+	} else {
+		fmt.Printf("new schema: %v\n", resp)
+	}
+
 	// perform mutations until ctrl+c
 	mutateUID := func(uid int) {
-		nb := rand.Intn(ib)
+		nb := rand.Intn(total * 100)
 		switch uid % 3 {
 		case 0:
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
 				SetNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, nb)),
-			}); err != nil {
+			}); err != nil && !errors.Is(err, dgo.ErrAborted) {
 				log.Fatalf("error in mutation :: %v\n", err)
+			} else if errors.Is(err, dgo.ErrAborted) {
+				return
 			}
 		case 1:
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
 				DelNquads: []byte(fmt.Sprintf(`<%v> <balance> * .`, uid)),
-			}); err != nil {
+			}); err != nil && !errors.Is(err, dgo.ErrAborted) {
 				log.Fatalf("error in deletion :: %v\n", err)
+			} else if errors.Is(err, dgo.ErrAborted) {
+				return
 			}
 			nb = -1
 		case 2:
-			numAccts++
+			uid = int(atomic.AddUint64(&numAccts, 1))
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
-				SetNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, numAccts, ib)),
-			}); err != nil {
+				SetNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, nb)),
+			}); err != nil && !errors.Is(err, dgo.ErrAborted) {
 				log.Fatalf("error in insertion :: %v\n", err)
+			} else if errors.Is(err, dgo.ErrAborted) {
+				return
 			}
 		}
 
 		lock.Lock()
-		mod[uid] = nb
+		acctsBal[uid] = nb
 		lock.Unlock()
 	}
 
@@ -117,7 +161,8 @@ func TestIndexInBG(t *testing.T) {
 			case <-quit:
 				return
 			default:
-				mutateUID(rand.Intn(total) + 1)
+				n := int(atomic.LoadUint64(&numAccts))
+				mutateUID(rand.Intn(n) + 1)
 				atomic.AddUint64(&counter, 1)
 			}
 		}
@@ -133,9 +178,10 @@ func TestIndexInBG(t *testing.T) {
 			fmt.Println("mutations:", atomic.LoadUint64(&counter))
 		}
 	}
-	swg.Add(3)
-	go runLoop()
-	go runLoop()
+	swg.Add(101)
+	for i := 0; i < 100; i++ {
+		go runLoop()
+	}
 	go printStats()
 	<-sig
 	close(quit)
@@ -144,24 +190,41 @@ func TestIndexInBG(t *testing.T) {
 	fmt.Println("mutations done")
 
 	// compute reverse index
-	rmod := make(map[int][]int)
-	for uid, b := range mod {
-		if aa, ok := rmod[b]; ok {
-			rmod[b] = append(aa, uid)
-		} else {
-			rmod[b] = []int{b}
-		}
+	balIndex := make(map[int][]int)
+	for uid, bal := range acctsBal {
+		balIndex[bal] = append(balIndex[bal], uid)
 	}
-	for _, aa := range rmod {
+	for _, aa := range balIndex {
 		sort.Ints(aa)
+	}
+
+	checkDelete := func(uid int) error {
+		q := fmt.Sprintf(`{ q(func: uid(%v)) {balance}}`, uid)
+		resp, err := dg.NewReadOnlyTxn().Query(context.Background(), q)
+		if err != nil {
+			log.Fatalf("error in query: %v :: %v\n", q, err)
+		}
+		var data struct {
+			Q []struct {
+				Balance string
+			}
+		}
+		if err := json.Unmarshal(resp.Json, &data); err != nil {
+			log.Fatalf("error in json.Unmarshal :: %v", err)
+		}
+
+		if len(data.Q) != 0 {
+			return fmt.Errorf("found a deleted UID, %v", uid)
+		}
+		return nil
 	}
 
 	// check values now
 	checkBalance := func(b int, uids []int) error {
-		q := fmt.Sprintf(`{ q(func: eq(balance, "%v")) {uid}}`, b)
-		resp, err := dg.NewTxn().Query(context.Background(), q)
+		q := fmt.Sprintf(`{ q(func: anyoftext(balance, "%v")) {uid}}`, b)
+		resp, err := dg.NewReadOnlyTxn().Query(context.Background(), q)
 		if err != nil {
-			log.Fatalf("error in query :: %v\n", err)
+			log.Fatalf("error in query: %v :: %v\n", q, err)
 		}
 		var data struct {
 			Q []struct {
@@ -172,22 +235,22 @@ func TestIndexInBG(t *testing.T) {
 			log.Fatalf("error in json.Unmarshal :: %v", err)
 		}
 
-		e := make([]int, len(data.Q))
+		actual := make([]int, len(data.Q))
 		for i, ui := range data.Q {
 			v, err := strconv.ParseInt(ui.UID, 0, 64)
 			if err != nil {
 				return err
 			}
-			e[i] = int(v)
+			actual[i] = int(v)
 		}
-		sort.Ints(e)
+		sort.Ints(actual)
 
-		if len(e) != len(uids) {
-			return fmt.Errorf("length not equal :: exp: %v, actual %v", e, uids)
+		if len(actual) != len(uids) {
+			return fmt.Errorf("length not equal :: exp: %v, actual %v", uids, actual)
 		}
 		for i := range uids {
-			if uids[i] != e[i] {
-				return fmt.Errorf("value not equal :: exp: %v, actual %v", e, uids)
+			if uids[i] != actual[i] {
+				return fmt.Errorf("value not equal :: exp: %v, actual %v", uids, actual)
 			}
 		}
 
@@ -195,49 +258,57 @@ func TestIndexInBG(t *testing.T) {
 	}
 
 	type pair struct {
-		uid int
+		key int
 		err string
 	}
 	ch := make(chan pair, numAccts)
 
 	fmt.Println("starting to query")
-	var wg sync.WaitGroup
 	var count uint64
-	for b, uids := range rmod {
-		wg.Add(1)
-		go func(ba int, luid []int) {
-			defer wg.Done()
-			if err := checkBalance(ba, luid); err != nil {
-				ch <- pair{ba, err.Error()}
-			}
-			atomic.AddUint64(&count, 1)
-		}(b, uids)
-	}
-
-	wg.Add(1)
+	th := y.NewThrottle(50000)
+	th.Do()
 	go func() {
-		defer wg.Done()
+		defer th.Done(nil)
 		for {
 			time.Sleep(2 * time.Second)
 			cur := atomic.LoadUint64(&count)
-			fmt.Printf("%v/%v done\n", cur, numAccts)
-			if cur+1 == uint64(numAccts) {
+			fmt.Printf("%v/%v done\n", cur, len(balIndex))
+			if int(cur+1) == len(balIndex) {
 				break
 			}
 		}
 	}()
-	wg.Wait()
+
+	for balance, uids := range balIndex {
+		th.Do()
+		go func(bal int, uidList []int) {
+			defer th.Done(nil)
+			if bal == -1 {
+				for _, uid := range uidList {
+					if err := checkDelete(uid); err != nil {
+						ch <- pair{uid, err.Error()}
+					}
+				}
+			} else {
+				if err := checkBalance(bal, uidList); err != nil {
+					ch <- pair{bal, err.Error()}
+				}
+			}
+			atomic.AddUint64(&count, 1)
+		}(balance, uids)
+	}
+	th.Finish()
 
 	close(ch)
 	for p := range ch {
-		t.Logf("failed for %v, :: %v\n", p.uid, p.err)
+		t.Logf("failed for %v, :: %v\n", p.key, p.err)
 	}
 }
 
 func TestReverseIndexInBG(t *testing.T) {
 	total := 1000000
 
-	dg, err := testutil.DgraphClient(testutil.SockAddr)
+	dg, err := getClient()
 	if err != nil {
 		log.Fatalf("Error while getting a dgraph client: %v", err)
 	}
@@ -278,7 +349,7 @@ func TestReverseIndexInBG(t *testing.T) {
 	}
 
 	numEdges := int64(total)
-	mod := sync.Map{}
+	updated := sync.Map{}
 	mutateUID := func(uid int) {
 		switch uid % 4 {
 		case 0:
@@ -288,7 +359,7 @@ func TestReverseIndexInBG(t *testing.T) {
 			}); err != nil {
 				log.Fatalf("error in mutation :: %v\n", err)
 			}
-			mod.Store(uid, nil)
+			updated.Store(uid, nil)
 		case 1:
 			v := atomic.AddInt64(&numEdges, 1)
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
@@ -304,7 +375,7 @@ func TestReverseIndexInBG(t *testing.T) {
 			}); err != nil {
 				log.Fatalf("error in deletion :: %v\n", err)
 			}
-			mod.Store(uid, nil)
+			updated.Store(uid, nil)
 		case 3:
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
@@ -314,7 +385,7 @@ func TestReverseIndexInBG(t *testing.T) {
 			}); err != nil {
 				log.Fatalf("error in mutation :: %v\n", err)
 			}
-			mod.Store(uid, nil)
+			updated.Store(uid, nil)
 		}
 	}
 
@@ -347,7 +418,7 @@ func TestReverseIndexInBG(t *testing.T) {
 	// check values now
 	checkUID := func(i int) error {
 		q := fmt.Sprintf(`{ q(func: uid(%v)) { ~balance { uid }}}`, i)
-		resp, err := dg.NewTxn().Query(context.Background(), q)
+		resp, err := dg.NewReadOnlyTxn().Query(context.Background(), q)
 		if err != nil {
 			log.Fatalf("error in query :: %v\n", err)
 		}
@@ -362,7 +433,7 @@ func TestReverseIndexInBG(t *testing.T) {
 			log.Fatalf("error in json.Unmarshal :: %v", err)
 		}
 
-		_, ok := mod.Load(i)
+		_, ok := updated.Load(i)
 		switch {
 		case !ok || i > total || i%4 == 1:
 			if len(data.Q) != 1 || len(data.Q[0].Balance) != 1 {
@@ -394,7 +465,7 @@ func TestReverseIndexInBG(t *testing.T) {
 			}
 		case i%4 == 2:
 			if len(data.Q) != 0 {
-				return fmt.Errorf("length not equal, got: %+v", data)
+				return fmt.Errorf("length not equal, del, got: %+v", data)
 			}
 		case i%4 == 3:
 			if len(data.Q) != 1 || len(data.Q[0].Balance) != 3 {

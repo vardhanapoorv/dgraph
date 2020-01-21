@@ -842,6 +842,20 @@ func rebuildIndex(ctx context.Context, rb *IndexRebuild) error {
 			}
 		})
 	}
+
+	if rb.Attr == "balance" {
+		go func() {
+			glog.Infof("BEGIN background indexing\n")
+			if err := builder.Run(context.Background()); err != nil {
+				panic(err)
+			}
+
+			glog.Infof("DONE background indexing\n")
+		}()
+
+		return nil
+	}
+
 	return builder.Run(ctx)
 }
 
@@ -914,6 +928,20 @@ func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
 	pk := x.ParsedKey{Attr: rb.Attr}
 	builder := rebuilder{attr: rb.Attr, prefix: pk.DataPrefix(), startTs: rb.StartTs}
 	builder.fn = fn
+
+	if rb.Attr == "balance" {
+		go func() {
+			glog.Infof("BEGIN background indexing\n")
+			if err := builder.Run(context.Background()); err != nil {
+				panic(err)
+			}
+
+			glog.Infof("DONE background indexing\n")
+		}()
+
+		return nil
+	}
+
 	if err := builder.Run(ctx); err != nil {
 		return err
 	}
@@ -995,6 +1023,19 @@ func rebuildReverseEdges(ctx context.Context, rb *IndexRebuild) error {
 			}
 		})
 	}
+
+	if rb.Attr == "balance" {
+		go func() {
+			glog.Infof("BEGIN background indexing\n")
+			if err := builder.Run(context.Background()); err != nil {
+				panic(err)
+			}
+
+			glog.Infof("DONE background indexing\n")
+		}()
+		return nil
+	}
+
 	return builder.Run(ctx)
 }
 
