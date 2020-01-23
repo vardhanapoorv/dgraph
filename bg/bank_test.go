@@ -53,7 +53,7 @@ func getClient() (*dgo.Dgraph, error) {
 }
 
 func TestCountIndexInBG(t *testing.T) {
-	total := 100
+	total := 100000
 	numAccts := uint64(total)
 	acctsBal := make([]int, total+100000)
 	acctsLock := make([]sync.Mutex, total+100000)
@@ -72,25 +72,31 @@ func TestCountIndexInBG(t *testing.T) {
 	}
 
 	if err := testutil.AssignUids(uint64(total * 10)); err != nil {
-		log.Fatalf("error in assignig UIDs :: %v", err)
+		log.Fatalf("error in assigning UIDs :: %v", err)
 	}
 
 	// first insert bank accounts
 	fmt.Println("inserting accounts")
+	th := y.NewThrottle(10000)
 	for i := 1; i <= int(numAccts); i++ {
-		bb := &bytes.Buffer{}
-		acctsBal[i] = rand.Intn(1000)
-		for j := 0; j < acctsBal[i]; j++ {
-			_, err := bb.WriteString(fmt.Sprintf("<%v> <balance> \"%v\" .\n", i, j))
-			if err != nil {
-				log.Fatalf("error in mutation %v\n", err)
+		th.Do()
+		go func(uid int) {
+			defer th.Done(nil)
+			bb := &bytes.Buffer{}
+			acctsBal[uid] = rand.Intn(1000)
+			for j := 0; j < acctsBal[uid]; j++ {
+				_, err := bb.WriteString(fmt.Sprintf("<%v> <balance> \"%v\" .\n", uid, j))
+				if err != nil {
+					log.Fatalf("error in mutation %v\n", err)
+				}
 			}
-		}
-		dg.NewTxn().Mutate(context.Background(), &api.Mutation{
-			CommitNow: true,
-			SetNquads: bb.Bytes(),
-		})
+			dg.NewTxn().Mutate(context.Background(), &api.Mutation{
+				CommitNow: true,
+				SetNquads: bb.Bytes(),
+			})
+		}(i)
 	}
+	th.Finish()
 
 	fmt.Println("building indexes in background")
 	if err := dg.Alter(context.Background(), &api.Operation{
@@ -122,12 +128,12 @@ func TestCountIndexInBG(t *testing.T) {
 			}
 			nb++
 		case 1:
-			if nb < 0 {
+			if nb <= 0 {
 				return
 			}
 			if _, err := dg.NewTxn().Mutate(context.Background(), &api.Mutation{
 				CommitNow: true,
-				DelNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, nb)),
+				DelNquads: []byte(fmt.Sprintf(`<%v> <balance> "%v" .`, uid, nb-1)),
 			}); err != nil && !errors.Is(err, dgo.ErrAborted) {
 				log.Fatalf("error in deletion :: %v\n", err)
 			} else if errors.Is(err, dgo.ErrAborted) {
@@ -195,7 +201,8 @@ func TestCountIndexInBG(t *testing.T) {
 
 	// compute count index
 	balIndex := make(map[int][]int)
-	for uid, bal := range acctsBal[:numAccts] {
+	for uid := 1; uid <= int(numAccts); uid++ {
+		bal := acctsBal[uid]
 		balIndex[bal] = append(balIndex[bal], uid)
 	}
 	for _, aa := range balIndex {
@@ -217,7 +224,7 @@ func TestCountIndexInBG(t *testing.T) {
 			log.Fatalf("error in json.Unmarshal :: %v", err)
 		}
 
-		if len(data.Q) != 0 {
+		if len(data.Q) != 1 && data.Q[0].Balance != 0 {
 			return fmt.Errorf("found a deleted UID, %v", uid)
 		}
 		return nil
@@ -269,7 +276,7 @@ func TestCountIndexInBG(t *testing.T) {
 
 	fmt.Println("starting to query")
 	var count uint64
-	th := y.NewThrottle(50000)
+	th = y.NewThrottle(50000)
 	th.Do()
 	go func() {
 		defer th.Done(nil)
