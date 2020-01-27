@@ -528,13 +528,11 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	dbOpts := badger.DefaultOptions(tmpIndexDir).
 		WithSyncWrites(false).
 		WithNumVersionsToKeep(math.MaxInt64).
+		WithLogger(&x.ToGlog{}).
 		WithCompression(options.None).
 		WithEventLogging(false).
 		WithLogRotatesToFlush(10).
-		WithMaxCacheSize(50) // TODO(Aman): Disable cache altogether
-
-	// TODO(Ibrahim): Remove this once badger is updated.
-	dbOpts.ZSTDCompressionLevel = 1
+		WithCompression(options.None)
 
 	tmpDB, err := badger.OpenManaged(dbOpts)
 	if err != nil {
@@ -553,9 +551,6 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	// Todo(Aman): Replace TxnWriter with WriteBatch. While we do that we should ensure that
 	// WriteBatch has a mechanism for throttling. Also, find other places where TxnWriter
 	// could be replaced with WriteBatch in the code
-	// Todo(Aman): Replace TxnWriter with WriteBatch. While we do that we should ensure that
-	// WriteBatch has a mechanism for throttling. Also, find other places where TxnWriter
-	// could be replaced with WriteBatch in the code.
 	tmpWriter := NewTxnWriter(tmpDB)
 	stream := pstore.NewStreamAt(r.startTs)
 	stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
@@ -684,8 +679,25 @@ const (
 	indexRebuild         = iota // Index should be deleted and rebuilt.
 )
 
-// Run rebuilds all indices that need it.
-func (rb *IndexRebuild) Run(ctx context.Context) error {
+// DropIndexes drops indexes.
+func (rb *IndexRebuild) DropIndexes(ctx context.Context) error {
+	glog.Infof("Begin dropping indexes")
+	defer glog.Infof("Done dropping indexes")
+
+	if err := dropIndex(ctx, rb); err != nil {
+		return err
+	}
+	if err := dropReverseEdges(ctx, rb); err != nil {
+		return err
+	}
+	return dropCountIndex(ctx, rb)
+}
+
+// BuildIndexes builds indexes.
+func (rb *IndexRebuild) BuildIndexes(ctx context.Context) error {
+	glog.Infof("Begin building indexes")
+	defer glog.Infof("Done building indexes")
+
 	if err := rebuildListType(ctx, rb); err != nil {
 		return err
 	}
@@ -772,9 +784,7 @@ func (rb *IndexRebuild) needsIndexRebuild() indexRebuildInfo {
 	}
 }
 
-// rebuildIndex rebuilds index for a given attribute.
-// We commit mutations with startTs and ignore the errors.
-func rebuildIndex(ctx context.Context, rb *IndexRebuild) error {
+func dropIndex(ctx context.Context, rb *IndexRebuild) error {
 	// Exit early if indices do not need to be rebuilt.
 	rebuildInfo := rb.needsIndexRebuild()
 
@@ -790,8 +800,17 @@ func rebuildIndex(ctx context.Context, rb *IndexRebuild) error {
 		}
 	}
 
+	return nil
+}
+
+// rebuildIndex rebuilds index for a given attribute.
+// We commit mutations with startTs and ignore the errors.
+func rebuildIndex(ctx context.Context, rb *IndexRebuild) error {
+	// Exit early if indices do not need to be rebuilt.
+	rebuildInfo := rb.needsIndexRebuild()
+
 	// Exit early if the index only need to be deleted and not rebuilt.
-	if rebuildInfo.op == indexDelete {
+	if rebuildInfo.op != indexRebuild {
 		return nil
 	}
 
@@ -869,8 +888,7 @@ func (rb *IndexRebuild) needsCountIndexRebuild() indexOp {
 	return indexRebuild
 }
 
-// rebuildCountIndex rebuilds the count index for a given attribute.
-func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
+func dropCountIndex(ctx context.Context, rb *IndexRebuild) error {
 	op := rb.needsCountIndexRebuild()
 	if op == indexNoop {
 		return nil
@@ -881,8 +899,15 @@ func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
 		return err
 	}
 
+	return nil
+}
+
+// rebuildCountIndex rebuilds the count index for a given attribute.
+func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
+	op := rb.needsCountIndexRebuild()
+
 	// Exit early if attribute is index only needed to be deleted.
-	if op == indexDelete {
+	if op != indexRebuild {
 		return nil
 	}
 
@@ -953,20 +978,22 @@ func (rb *IndexRebuild) needsReverseEdgesRebuild() indexOp {
 	return indexDelete
 }
 
-// rebuildReverseEdges rebuilds the reverse edges for a given attribute.
-func rebuildReverseEdges(ctx context.Context, rb *IndexRebuild) error {
+func dropReverseEdges(ctx context.Context, rb *IndexRebuild) error {
 	op := rb.needsReverseEdgesRebuild()
 	if op == indexNoop {
 		return nil
 	}
 
 	glog.Infof("Deleting reverse index for %s", rb.Attr)
-	if err := deleteReverseEdges(rb.Attr); err != nil {
-		return err
-	}
+	return deleteReverseEdges(rb.Attr)
+}
+
+// rebuildReverseEdges rebuilds the reverse edges for a given attribute.
+func rebuildReverseEdges(ctx context.Context, rb *IndexRebuild) error {
+	op := rb.needsReverseEdgesRebuild()
 
 	// Exit early if index only needed to be deleted.
-	if op == indexDelete {
+	if op != indexRebuild {
 		return nil
 	}
 

@@ -118,23 +118,6 @@ func runMutation(ctx context.Context, edge *pb.DirectedEdge, txn *posting.Txn) e
 // This is serialized with mutations, called after applied watermarks catch up
 // and further mutations are blocked until this is done.
 func runSchemaMutation(ctx context.Context, update *pb.SchemaUpdate, startTs uint64) error {
-	if err := runSchemaMutationHelper(ctx, update, startTs); err != nil {
-		// on error, we restore the memory state to be the same as the disk
-		maxRetries := 10
-		loadErr := x.RetryUntilSuccess(maxRetries, 10*time.Millisecond, func() error {
-			return schema.Load(update.Predicate)
-		})
-
-		if loadErr != nil {
-			glog.Fatalf("failed to load schema after %d retries: %v", maxRetries, loadErr)
-		}
-		return err
-	}
-
-	return updateSchema(update)
-}
-
-func runSchemaMutationHelper(ctx context.Context, update *pb.SchemaUpdate, startTs uint64) error {
 	if tablet, err := groups().Tablet(update.Predicate); err != nil {
 		return err
 	} else if tablet.GetGroupId() != groups().groupId() {
@@ -144,10 +127,30 @@ func runSchemaMutationHelper(ctx context.Context, update *pb.SchemaUpdate, start
 	if err := checkSchema(update); err != nil {
 		return err
 	}
+
+	return runSchemaMutationHelper(ctx, update, startTs)
+}
+
+func runSchemaMutationHelper(ctx context.Context, update *pb.SchemaUpdate, startTs uint64) error {
+	complete := false
+
 	old, _ := schema.State().Get(update.Predicate)
 	// Sets only in memory, we will update it on disk only after schema mutations
 	// are successful and  written to disk.
 	schema.State().Set(update.Predicate, update)
+
+	defer func() {
+		if !complete {
+			maxRetries := 10
+			loadErr := x.RetryUntilSuccess(maxRetries, 10*time.Millisecond, func() error {
+				return schema.Load(update.Predicate)
+			})
+
+			if loadErr != nil {
+				glog.Fatalf("failed to load schema after %d retries: %v", maxRetries, loadErr)
+			}
+		}
+	}()
 
 	// Once we remove index or reverse edges from schema, even though the values
 	// are present in db, they won't be used due to validation in work/task.go
@@ -167,7 +170,21 @@ func runSchemaMutationHelper(ctx context.Context, update *pb.SchemaUpdate, start
 		OldSchema:     &old,
 		CurrentSchema: update,
 	}
-	return rebuild.Run(ctx)
+
+	// indexes needs to be dropped right away before any mutation is applied.
+	if err := rebuild.DropIndexes(ctx); err != nil {
+		return err
+	}
+
+	if err := rebuild.BuildIndexes(ctx); err != nil {
+		return err
+	}
+	if err := updateSchema(update); err != nil {
+		return err
+	}
+
+	complete = true
+	return nil
 }
 
 // updateSchema commits the schema to disk in blocking way, should be ok because this happens
