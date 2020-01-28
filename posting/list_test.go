@@ -999,8 +999,11 @@ func writePostingListToDisk(kvs []*bpb.KV) error {
 	return writer.Flush()
 }
 
+// These tests have been skipped because split has been disabled. They should be renabled once split
+// is enabled.
 // Create a multi-part list and verify all the uids are there.
 func TestMultiPartListBasic(t *testing.T) {
+	t.Skip()
 	size := int(1e5)
 	ol, commits := createMultiPartList(t, size, false)
 	opt := ListOptions{ReadTs: uint64(size) + 1}
@@ -1014,6 +1017,7 @@ func TestMultiPartListBasic(t *testing.T) {
 
 // Verify that iteration works with an afterUid value greater than zero.
 func TestMultiPartListIterAfterUid(t *testing.T) {
+	t.Skip()
 	size := int(1e5)
 	ol, _ := createMultiPartList(t, size, false)
 
@@ -1030,6 +1034,7 @@ func TestMultiPartListIterAfterUid(t *testing.T) {
 
 // Verify that postings can be retrieved in multi-part lists.
 func TestMultiPartListWithPostings(t *testing.T) {
+	t.Skip()
 	size := int(1e5)
 	ol, commits := createMultiPartList(t, size, true)
 
@@ -1049,6 +1054,7 @@ func TestMultiPartListWithPostings(t *testing.T) {
 
 // Verify marshaling of multi-part lists.
 func TestMultiPartListMarshal(t *testing.T) {
+	t.Skip()
 	size := int(1e5)
 	ol, _ := createMultiPartList(t, size, false)
 
@@ -1080,6 +1086,7 @@ func TestMultiPartListMarshal(t *testing.T) {
 
 // Verify that writing a multi-part list to disk works correctly.
 func TestMultiPartListWriteToDisk(t *testing.T) {
+	t.Skip()
 	size := int(1e5)
 	originalList, commits := createMultiPartList(t, size, false)
 
@@ -1105,6 +1112,7 @@ func TestMultiPartListWriteToDisk(t *testing.T) {
 
 // Verify that adding and deleting all the entries returns an empty list.
 func TestMultiPartListDelete(t *testing.T) {
+	t.Skip()
 	size := int(1e4)
 	ol, commits := createAndDeleteMultiPartList(t, size)
 	require.Equal(t, size*2, commits)
