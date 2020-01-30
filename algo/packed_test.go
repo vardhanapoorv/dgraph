@@ -27,7 +27,7 @@ import (
 
 func newUidPack(data []uint64) *pb.UidPack {
 	// Using a small block size to make sure multiple blocks are used by the tests.
-	encoder := codec.Encoder{BlockSize: 5}
+	encoder := codec.NewEncoder(5)
 	for _, uid := range data {
 		encoder.Add(uid)
 	}
@@ -304,7 +304,7 @@ func TestSubSorted6Packed(t *testing.T) {
 }
 
 func TestIndexOfPacked1(t *testing.T) {
-	encoder := codec.Encoder{BlockSize: 10}
+	encoder := codec.NewEncoder(10)
 	for i := 0; i < 1000; i++ {
 		encoder.Add(uint64(i))
 	}
@@ -317,7 +317,7 @@ func TestIndexOfPacked1(t *testing.T) {
 }
 
 func TestIndexOfPacked2(t *testing.T) {
-	encoder := codec.Encoder{BlockSize: 10}
+	encoder := codec.NewEncoder(10)
 	for i := 0; i < 100; i++ {
 		encoder.Add(uint64(i))
 	}

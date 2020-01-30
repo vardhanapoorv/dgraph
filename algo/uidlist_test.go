@@ -452,7 +452,7 @@ func TestIntersectCompressedWithLinJump(t *testing.T) {
 			// Intersection of blockNums and otherNums is commonNums.
 			commonNums, blockNums, otherNums := fillNums(N1, N2)
 
-			enc := codec.Encoder{BlockSize: 10}
+			enc := codec.NewEncoder(10)
 			for _, num := range blockNums {
 				enc.Add(num)
 			}

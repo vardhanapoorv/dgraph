@@ -28,7 +28,7 @@ import (
 func ApplyFilterPacked(u *pb.UidPack, f func(uint64, int) bool) *pb.UidPack {
 	index := 0
 	decoder := codec.NewDecoder(u)
-	encoder := codec.Encoder{BlockSize: int(u.BlockSize)}
+	encoder := codec.NewEncoder(int(u.BlockSize))
 
 	for ; decoder.Valid(); decoder.Next() {
 		for _, uid := range decoder.Uids() {
@@ -53,7 +53,7 @@ func IntersectWithLinPacked(u, v *pb.UidPack) *pb.UidPack {
 	vDec := codec.NewDecoder(v)
 	vuids := vDec.Uids()
 	uIdx, vIdx := 0, 0
-	result := codec.Encoder{BlockSize: int(u.BlockSize)}
+	result := codec.NewEncoder(int(u.BlockSize))
 
 	for {
 		// Break if the end of a list has been reached.
@@ -113,7 +113,7 @@ type listInfoPacked struct {
 // the intersections from the smallest to the largest list.
 func IntersectSortedPacked(lists []*pb.UidPack) *pb.UidPack {
 	if len(lists) == 0 {
-		encoder := codec.Encoder{BlockSize: 10}
+		encoder := codec.NewEncoder(10)
 		return encoder.Done()
 	}
 	ls := make([]listInfoPacked, 0, len(lists))
@@ -159,7 +159,7 @@ func DifferencePacked(u, v *pb.UidPack) *pb.UidPack {
 		return nil
 	}
 
-	result := codec.Encoder{BlockSize: int(u.BlockSize)}
+	result := codec.NewEncoder(int(u.BlockSize))
 
 	uDec := codec.NewDecoder(u)
 	uuids := uDec.Uids()
@@ -269,7 +269,7 @@ func MergeSortedPacked(lists []*pb.UidPack) *pb.UidPack {
 	}
 
 	// Our final result.
-	result := codec.Encoder{BlockSize: blockSize}
+	result := codec.NewEncoder(blockSize)
 	// emptyResult is used to keep track of whether the encoder contains data since the
 	// encoder storing the final result does not have an equivalent of len.
 	emptyResult := true

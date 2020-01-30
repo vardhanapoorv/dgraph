@@ -786,14 +786,14 @@ func (l *List) rollup(readTs uint64) (*rollupOutput, error) {
 	}
 
 	var plist *pb.PostingList
-	var enc codec.Encoder
+	var enc *codec.Encoder
 	var startUid, endUid uint64
 	var splitIdx int
 
 	// Method to properly initialize the variables above
 	// when a multi-part list boundary is crossed.
 	initializeSplit := func() {
-		enc = codec.Encoder{BlockSize: blockSize}
+		enc = codec.NewEncoder(blockSize)
 
 		// Otherwise, load the corresponding part and set endUid to correctly
 		// detect the end of the list.

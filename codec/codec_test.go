@@ -32,15 +32,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func getUids(size int) []uint64 {
-	var uids []uint64
-	last := uint64(rand.Intn(100))
-	uids = append(uids, last)
-	for i := 1; i < size; i++ {
-		last += uint64(rand.Intn(33))
-		uids = append(uids, last)
+func getUniqueUids(size int) []uint64 {
+	uids := make([]uint64, 0, size)
+	//var uids []uint64
+	uidMap := make(map[uint64]struct{}, size)
+	for len(uidMap) < size {
+		last := rand.Uint64()
+		if _, found := uidMap[last]; !found {
+			uids = append(uids, last)
+		}
+		uidMap[last] = struct{}{}
 	}
 	return uids
+}
+
+func sortedSample(ints []uint64, size int) []uint64 {
+	shuffle := append([]uint64(nil), ints...)
+	rand.Shuffle(size, func(i, j int) { shuffle[i], shuffle[j] = shuffle[j], shuffle[i] })
+	sortedShuffle := shuffle[:size]
+	sort.Slice(sortedShuffle, func(i, j int) bool { return sortedShuffle[i] < sortedShuffle[j] })
+	return sortedShuffle
 }
 
 func TestUidPack(t *testing.T) {
@@ -51,14 +62,12 @@ func TestUidPack(t *testing.T) {
 	require.Equal(t, 0, ApproxLen(&pb.UidPack{}))
 	require.Equal(t, 0, len(Decode(&pb.UidPack{}, 0)))
 
-	for i := 0; i < 13; i++ {
-		size := rand.Intn(10e6)
-		if size < 0 {
-			size = 1e6
-		}
+	randomUids := getUniqueUids(1 << 21)
+	for i := uint(0); i < 22; i += 3 {
+		size := rand.Intn(1 << i)
 		t.Logf("Testing with size = %d", size)
 
-		expected := getUids(size)
+		expected := sortedSample(randomUids, 10)
 		pack := Encode(expected, 256)
 		require.Equal(t, len(expected), ExactLen(pack))
 		actual := Decode(pack, 0)
@@ -68,7 +77,7 @@ func TestUidPack(t *testing.T) {
 
 func TestSeek(t *testing.T) {
 	N := 10001
-	enc := Encoder{BlockSize: 10}
+	enc := NewEncoder(10)
 	for i := 0; i < N; i += 10 {
 		enc.Add(uint64(i))
 	}
@@ -116,7 +125,7 @@ func TestSeek(t *testing.T) {
 
 func TestLinearSeek(t *testing.T) {
 	N := 10001
-	enc := Encoder{BlockSize: 10}
+	enc := NewEncoder(10)
 	for i := 0; i < N; i += 10 {
 		enc.Add(uint64(i))
 	}
@@ -144,7 +153,7 @@ func TestLinearSeek(t *testing.T) {
 func TestDecoder(t *testing.T) {
 	N := 10001
 	var expected []uint64
-	enc := Encoder{BlockSize: 10}
+	enc := NewEncoder(10)
 	for i := 3; i < N; i += 3 {
 		enc.Add(uint64(i))
 		expected = append(expected, uint64(i))
@@ -172,7 +181,7 @@ func TestDecoder(t *testing.T) {
 func BenchmarkGzip(b *testing.B) {
 	rand.Seed(time.Now().UnixNano())
 
-	uids := getUids(1e6)
+	uids := getUniqueUids(1e6)
 	b.ResetTimer()
 	sz := uint64(len(uids)) * 8
 
@@ -206,7 +215,7 @@ func BenchmarkGzip(b *testing.B) {
 func benchmarkUidPackEncode(b *testing.B, blockSize int) {
 	rand.Seed(time.Now().UnixNano())
 
-	uids := getUids(1e6)
+	uids := getUniqueUids(1e6)
 	sz := uint64(len(uids)) * 8
 	b.Logf("Dataset Len=%d. Size: %s", len(uids), humanize.Bytes(sz))
 	b.ResetTimer()
@@ -243,7 +252,7 @@ func BenchmarkUidPack(b *testing.B) {
 func benchmarkUidPackDecode(b *testing.B, blockSize int) {
 	rand.Seed(time.Now().UnixNano())
 
-	uids := getUids(1e6)
+	uids := getUniqueUids(1e6)
 	sz := uint64(len(uids)) * 8
 	b.Logf("Dataset Len=%d. Size: %s", len(uids), humanize.Bytes(sz))
 
@@ -292,7 +301,7 @@ func TestEncoding(t *testing.T) {
 }
 
 func newUidPack(data []uint64) *pb.UidPack {
-	encoder := Encoder{BlockSize: 10}
+	encoder := NewEncoder(10)
 	for _, uid := range data {
 		encoder.Add(uid)
 	}
@@ -303,4 +312,13 @@ func TestCopyUidPack(t *testing.T) {
 	pack := newUidPack([]uint64{1, 2, 3, 4, 5})
 	copy := CopyUidPack(pack)
 	require.Equal(t, Decode(pack, 0), Decode(copy, 0))
+}
+
+func TestNumMsb(t *testing.T) {
+	// Roaring bitmaps support 32 bit integers, so the number of most significant bits in the base
+	// must cover at least 64 bits - 32 bits of a UID.
+	require.GreaterOrEqual(t, numMsb, uint8(32))
+	require.LessOrEqual(t, numMsb, uint8(64))
+	// require.Equal(t, msbBitMask, uint64(0xffffffff00000000)) // For when numMsb = 32
+	// require.Equal(t, msbBitMask, uint64(0xffffffffff000000)) // For when numMsb = 40
 }
